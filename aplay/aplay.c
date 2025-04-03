@@ -130,6 +130,8 @@ static int use_strftime = 0;
 volatile static int recycle_capture_file = 0;
 static long term_c_lflag = -1;
 static int dump_hw_params = 0;
+static int mark_in_progress = 0;
+
 
 static int fd = -1;
 static off64_t pbrec_count = LLONG_MAX, fdcount;
@@ -225,6 +227,7 @@ _("Usage: %s [OPTION]... [FILE]...\n"
 "                        for this many seconds\n"
 "    --process-id-file   write the process ID here\n"
 "    --use-strftime      apply the strftime facility to the output file name\n"
+"    --mark-in-progress  append ._in_progress while files are being written\n"
 "    --dump-hw-params    dump hw_params of the device\n")
 		, command);
 	printf(_("Recognized sample formats are:"));
@@ -465,6 +468,7 @@ int main(int argc, char *argv[])
 		{"use-strftime", 0, 0, OPT_USE_STRFTIME},
 		{"interactive", 0, 0, 'i'},
 		{"dump-hw-params", 0, 0, OPT_DUMP_HWPARAMS},
+		{"mark-in-progress", no_argument, 0, 1002},
 		{0, 0, 0, 0}
 	};
 	char *pcm_name = "default";
@@ -668,6 +672,9 @@ int main(int argc, char *argv[])
 			break;
 		case OPT_DUMP_HWPARAMS:
 			dump_hw_params = 1;
+			break;
+		case 1002:
+			mark_in_progress = 1;
 			break;
 		default:
 			fprintf(stderr, _("Try `%s --help' for more information.\n"), command);
@@ -2602,7 +2609,7 @@ static int new_capture_file(char *name, char *namebuf, size_t namelen,
 			    int filecount)
 {
 	char *s;
-	char buf[PATH_MAX+1];
+	char buf[PATH_MAX + 1];
 	time_t t;
 	struct tm *tmp;
 
@@ -2613,17 +2620,21 @@ static int new_capture_file(char *name, char *namebuf, size_t namelen,
 			perror("localtime");
 			prg_exit(EXIT_FAILURE);
 		}
-		if (mystrftime(namebuf, namelen, name, tmp, filecount+1) == 0) {
+		if (mystrftime(namebuf, namelen, name, tmp, filecount + 1) == 0) {
 			fprintf(stderr, "mystrftime returned 0");
 			prg_exit(EXIT_FAILURE);
 		}
+		// Append ._in_progress
+		if (mark_in_progress)
+			snprintf(namebuf + strlen(namebuf), namelen - strlen(namebuf), "._in_progress");
 		return filecount;
 	}
 
-	/* get a copy of the original filename */
-	strncpy(buf, name, sizeof(buf));
+	// get a copy of the original filename
+	strncpy(buf, name, sizeof(buf) - 1);
+	buf[sizeof(buf) - 1] = '\0';
 
-	/* separate extension from filename */
+	// separate extension from filename
 	s = buf + strlen(buf);
 	while (s > buf && *s != '.' && *s != '/')
 		--s;
@@ -2632,7 +2643,7 @@ static int new_capture_file(char *name, char *namebuf, size_t namelen,
 	else if (*s == '/')
 		s = buf + strlen(buf);
 
-	/* upon first jump to this if block rename the first file */
+	// rename the first file, if needed
 	if (filecount == 1) {
 		if (*s)
 			snprintf(namebuf, namelen, "%s-01.%s", buf, s);
@@ -2643,14 +2654,19 @@ static int new_capture_file(char *name, char *namebuf, size_t namelen,
 		filecount = 2;
 	}
 
-	/* name of the current file */
+	// name of the current file
 	if (*s)
 		snprintf(namebuf, namelen, "%s-%02i.%s", buf, filecount, s);
 	else
 		snprintf(namebuf, namelen, "%s-%02i", buf, filecount);
 
+	// Append ._in_progress
+	if (mark_in_progress)
+		snprintf(namebuf + strlen(namebuf), namelen - strlen(namebuf), "._in_progress");
+
 	return filecount;
 }
+
 
 /**
  * create_path
@@ -2747,7 +2763,7 @@ static void capture(char *orig_name)
 		/* open a file to write */
 		if(!tostdout) {
 			/* upon the second file we start the numbering scheme */
-			if (filecount || use_strftime) {
+			if (mark_in_progress || filecount || use_strftime) {
 				filecount = new_capture_file(orig_name, namebuf,
 							     sizeof(namebuf),
 							     filecount);
@@ -2801,6 +2817,19 @@ static void capture(char *orig_name)
 		if (fmt_rec_table[file_type].end && !tostdout) {
 			fmt_rec_table[file_type].end(fd);
 			fd = -1;
+		}
+
+		if (!tostdout && name == namebuf) {
+			char final_name[PATH_MAX+1];
+			strncpy(final_name, namebuf, sizeof(final_name));
+			final_name[sizeof(final_name) - 1] = '\0';
+
+			// Remove "._in_progress" if present
+			char *ext = strstr(final_name, "._in_progress");
+			if (ext != NULL)
+				*ext = '\0'; // Truncate at start of suffix
+
+			rename(namebuf, final_name);
 		}
 
 		/* repeat the loop when format is raw without timelimit or
